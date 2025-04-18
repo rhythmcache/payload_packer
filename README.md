@@ -48,8 +48,15 @@ Options:
 | Speed            | Slower (high compression time)    | Much faster (both compress & decompress) |
 
 
+
+## Note:
+**This tool does not verify whether input `.img` files are valid Android partition images.**  
+It will pack any files with a `.img` extension.
+
+
 ## Build
-- Install cargo & rust compiler
+- Install Cargo & Rust Compiler
+
 ```
 git clone --depth 1 https://github.com/rhythmcache/payload_packer && cd payload_packer
 cargo build --release
