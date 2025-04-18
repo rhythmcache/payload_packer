@@ -3,7 +3,7 @@ name = "payload_packer"
 version = "0.1.0"
 edition = "2024"
 authors = ["rhythmcache"]
-description = "A tool to pack Android OTA payload files"
+description = "CLI Utility to pack android partitions as payload.bin"
 repository = "https://github.com/rhythmcache/payload_packer"
 
 [dependencies]
