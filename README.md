@@ -59,7 +59,7 @@ It will pack any files with a `.img` extension.
 ```
 cargo install payload_packer
 ```
-- (Download prebuilt Binaries)[https://github.com/rhythmcache/payload_packer/releases/tag/v0.1.0]
+- [Download prebuilt Binaries](https://github.com/rhythmcache/payload_packer/releases/tag/v0.1.0)
 
 
 #### Dependencies :
