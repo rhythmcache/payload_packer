@@ -13,7 +13,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-include!(concat!(env!("OUT_DIR"), "/chromeos_update_engine.rs"));
+include!("proto/update_metadata.rs");
 
 const PAYLOAD_MAGIC: &[u8] = b"CrAU";
 
