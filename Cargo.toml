@@ -3,32 +3,35 @@ name = "payload_packer"
 version = "0.1.0"
 edition = "2024"
 authors = ["rhythmcache"]
-description = "CLI Utility to pack android partitions as payload.bin"
+description = "CLI Utility to pack android device partitions as payload.bin"
 repository = "https://github.com/rhythmcache/payload_packer"
+homepage = "https://github.com/rhythmcache/payload_packer"
+readme = "README.md"
+license = "Apache-2.0"
+keywords = ["android", "payload", "packer", "partition", "cli"]
+categories = ["command-line-utilities", "compression", "filesystem"]
 
 [dependencies]
-anyhow = "*"
-byteorder = "*"
-clap = { version = "*", features = ["derive"] }
-digest = "*"
-hex = "*"
-indicatif = "*"
-lazy_static = "*"
-rust-lzma = "*"
-num_cpus = "*"
-prost = "*"
-rayon = "*"
-sha2 = "*"
-zstd = "*"
-base64 = "*"
-tempfile = "*"
+anyhow = "1.0"
+byteorder = "1.5"
+clap = { version = "4.5", features = ["derive"] }
+digest = "0.10"
+hex = "0.4"
+indicatif = "0.17"
+lazy_static = "1.4"
+rust-lzma = "0.6"
+num_cpus = "1.16"
+prost = "0.13.5"
+rayon = "1.8"
+sha2 = "0.10"
+zstd = "0.13.3"
+base64 = "0.22.1"
+tempfile = "3.10"
 
-[build-dependencies]
-prost-build = "*"
 
 [profile.release]
-strip = true         
-lto = true         
-opt-level = "z"    
-codegen-units = 1     
+strip = true
+lto = true
+opt-level = "z"
+codegen-units = 1
 panic = "abort"
