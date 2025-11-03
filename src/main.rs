@@ -9,14 +9,16 @@ use rayon::prelude::*;
 use sha2::Sha256;
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+mod structs;
+use structs::*;
 
 include!("proto/update_metadata.rs");
 
 const PAYLOAD_MAGIC: &[u8] = b"CrAU";
-
 const PAYLOAD_VERSION: u64 = 2;
 
 #[derive(Parser, Clone)]
@@ -48,8 +50,8 @@ struct Args {
     #[arg(
         long,
         default_value = "xz",
-        value_parser = ["xz", "zstd"],
-        help = "Compression method to use (xz or zstd)"
+        value_parser = ["xz", "zstd", "bz2"],
+        help = "Compression method to use (xz, zstd, or bz2)"
     )]
     method: String,
 
@@ -61,6 +63,13 @@ struct Args {
 
     #[arg(long, help = "Skip creation of payload_properties.txt file")]
     skip_prop: bool,
+
+    #[arg(
+        long,
+        default_value = "2097152",
+        help = "Target chunk size per operation in bytes (default: 2MB = 2097152)"
+    )]
+    chunk_size: u64,
 }
 
 struct ImageInfo {
@@ -119,6 +128,119 @@ fn calculate_hash(file_path: &Path) -> Result<Vec<u8>> {
     Ok(hasher.finalize().to_vec())
 }
 
+fn calculate_hash_from_data(data: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().to_vec()
+}
+
+fn compress_data(data: &[u8], compression_method: &str) -> Result<Vec<u8>> {
+    match compression_method {
+        "xz" => {
+            use liblzma::write::XzEncoder;
+            let mut encoder = XzEncoder::new(Vec::new(), 9);
+            encoder.write_all(data)?;
+            Ok(encoder.finish()?)
+        }
+        "bz2" | "bzip2" => {
+            use bzip2::Compression;
+            use bzip2::write::BzEncoder;
+            let mut encoder = BzEncoder::new(Vec::new(), Compression::best());
+            encoder.write_all(data)?;
+            Ok(encoder.finish()?)
+        }
+        "zstd" => {
+            let mut encoder = zstd::Encoder::new(Vec::new(), 19)?;
+            encoder.write_all(data)?;
+            Ok(encoder.finish()?)
+        }
+        _ => Err(anyhow!(
+            "Unsupported compression method: {}",
+            compression_method
+        )),
+    }
+}
+
+fn get_operation_type(compression_method: &str) -> install_operation::Type {
+    match compression_method {
+        "xz" => install_operation::Type::ReplaceXz,
+        "bz2" | "bzip2" => install_operation::Type::ReplaceBz,
+        "zstd" => install_operation::Type::Zstd,
+        _ => install_operation::Type::Replace,
+    }
+}
+
+fn create_install_operations(
+    image_path: &Path,
+    image_size: u64,
+    block_size: u32,
+    compression_method: &str,
+    target_chunk_size: u64,
+) -> Result<Vec<(InstallOperation, PathBuf, u64)>> {
+    let mut operations = Vec::new();
+
+    // Align chunk size to block boundaries
+    let chunk_size =
+        ((target_chunk_size + block_size as u64 - 1) / block_size as u64) * block_size as u64;
+
+    let mut file = File::open(image_path)?;
+    let mut offset = 0u64;
+    let mut current_block = 0u64;
+    let mut op_index = 0;
+
+    while offset < image_size {
+        let remaining = image_size - offset;
+        let this_chunk_size = remaining.min(chunk_size);
+
+        // Read chunk from image
+        file.seek(SeekFrom::Start(offset))?;
+        let mut chunk_data = vec![0u8; this_chunk_size as usize];
+        file.read_exact(&mut chunk_data)?;
+
+        // Compress chunk
+        let compressed_data = compress_data(&chunk_data, compression_method)?;
+
+        // Calculate SHA256 hash of compressed data
+        let hash = calculate_hash_from_data(&compressed_data);
+
+        // Write to temp file
+        let temp_dir = tempfile::Builder::new()
+            .prefix("payload_builder_")
+            .tempdir()?;
+        let temp_file_path = temp_dir.path().join(format!("chunk_{}", op_index));
+        fs::write(&temp_file_path, &compressed_data)?;
+
+        let compressed_size = compressed_data.len() as u64;
+        let num_blocks = (this_chunk_size + block_size as u64 - 1) / block_size as u64;
+
+        let operation = InstallOperation {
+            r#type: get_operation_type(compression_method) as i32,
+            data_offset: Some(0), // Will be updated later
+            data_length: Some(compressed_size),
+            src_extents: Vec::new(),
+            src_length: None,
+            dst_extents: vec![Extent {
+                start_block: Some(current_block),
+                num_blocks: Some(num_blocks),
+            }],
+            dst_length: Some(this_chunk_size),
+            data_sha256_hash: Some(hash), // SHA256 hash stored here
+            src_sha256_hash: None,
+        };
+
+        let temp_path = temp_file_path.to_path_buf();
+        std::mem::forget(temp_dir);
+
+        operations.push((operation, temp_path, compressed_size));
+
+        offset += this_chunk_size;
+        current_block += num_blocks;
+        op_index += 1;
+    }
+
+    Ok(operations)
+}
+
 fn find_image_files(args: &Args) -> Result<Vec<ImageInfo>> {
     let mut image_paths = Vec::new();
     let mut seen_names = HashSet::new();
@@ -127,6 +249,7 @@ fn find_image_files(args: &Args) -> Result<Vec<ImageInfo>> {
     } else {
         args.images.split(',').collect::<HashSet<_>>()
     };
+
     if let Some(images_dir) = &args.images_dir {
         if !images_dir.exists() || !images_dir.is_dir() {
             return Err(anyhow!(
@@ -155,6 +278,7 @@ fn find_image_files(args: &Args) -> Result<Vec<ImageInfo>> {
             }
         }
     }
+
     for path in &args.images_path {
         if !path.exists() || !path.is_file() {
             return Err(anyhow!("Image file does not exist: {:?}", path));
@@ -178,6 +302,7 @@ fn find_image_files(args: &Args) -> Result<Vec<ImageInfo>> {
     if image_paths.is_empty() {
         return Err(anyhow!("No image files found"));
     }
+
     let thread_count = args.threads.unwrap_or_else(num_cpus::get);
     rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
@@ -245,7 +370,7 @@ fn find_image_files(args: &Args) -> Result<Vec<ImageInfo>> {
                 })
             } else {
                 if let Some(pb) = pb {
-                    pb.finish_with_message(format!("✕ Failed to process {}", name));
+                    pb.finish_with_message(format!("✗ Failed to process {}", name));
                 }
 
                 Err(anyhow!("Failed to process image: {}", name))
@@ -275,7 +400,6 @@ fn create_payload_properties(
         hasher.finalize().to_vec()
     };
 
-    // Write properties to file
     writeln!(file, "FILE_HASH={}", STANDARD.encode(&file_hash))?;
     writeln!(file, "FILE_SIZE={}", file_size)?;
     writeln!(file, "METADATA_HASH={}", STANDARD.encode(&metadata_hash))?;
@@ -288,91 +412,15 @@ fn create_payload_properties(
     Ok(())
 }
 
-fn create_install_operation(
-    image_path: &Path,
-    image_size: u64,
-    block_size: u32,
-    compression_method: &str,
-) -> Result<(InstallOperation, PathBuf, u64)> {
-    let temp_dir = tempfile::Builder::new()
-        .prefix("payload_builder_")
-        .tempdir()?;
-    let temp_file_path = temp_dir.path().join("compressed_data");
-    let file = File::create(&temp_file_path)?;
-    let mut writer = BufWriter::new(file);
-
-    let operation_type = match compression_method {
-        "xz" => {
-            let mut encoder = lzma::LzmaWriter::new_compressor(&mut writer, 9)?;
-            const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
-            let mut buffer = vec![0; CHUNK_SIZE];
-            let mut reader = BufReader::new(File::open(image_path)?);
-
-            loop {
-                let bytes_read = reader.read(&mut buffer)?;
-                if bytes_read == 0 {
-                    break;
-                }
-                encoder.write_all(&buffer[..bytes_read])?;
-            }
-            encoder.finish()?;
-            install_operation::Type::ReplaceXz
-        }
-        "zstd" => {
-            let mut encoder = zstd::Encoder::new(&mut writer, 19)?;
-            const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
-            let mut buffer = vec![0; CHUNK_SIZE];
-            let mut reader = BufReader::new(File::open(image_path)?);
-
-            loop {
-                let bytes_read = reader.read(&mut buffer)?;
-                if bytes_read == 0 {
-                    break;
-                }
-                encoder.write_all(&buffer[..bytes_read])?;
-            }
-            encoder.finish()?;
-            install_operation::Type::Zstd
-        }
-        _ => {
-            return Err(anyhow!(
-                "Unsupported compression method: {}",
-                compression_method
-            ));
-        }
-    };
-
-    writer.flush()?;
-    let compressed_size = fs::metadata(&temp_file_path)?.len();
-    let hash = calculate_hash(&temp_file_path)?;
-    let num_blocks = (image_size + block_size as u64 - 1) / block_size as u64;
-    let dst_extent = Extent {
-        start_block: Some(0),
-        num_blocks: Some(num_blocks),
-    };
-    let operation = InstallOperation {
-        r#type: operation_type as i32,
-        data_offset: Some(0),
-        data_length: Some(compressed_size),
-        src_extents: Vec::new(),
-        src_length: None,
-        dst_extents: vec![dst_extent],
-        dst_length: Some(image_size),
-        data_sha256_hash: Some(hash),
-        src_sha256_hash: None,
-    };
-    let temp_file_path = temp_file_path.to_path_buf();
-    std::mem::forget(temp_dir);
-
-    Ok((operation, temp_file_path, compressed_size))
-}
-
 fn create_partition_update(
     image_info: &ImageInfo,
     block_size: u32,
     compression_method: &str,
+    chunk_size: u64,
     multi_progress: &MultiProgress,
-) -> Result<(PartitionUpdate, PathBuf, u64)> {
+) -> Result<(PartitionUpdate, Vec<PathBuf>, u64)> {
+    let expected_ops = (image_info.size + chunk_size - 1) / chunk_size;
+
     let pb = multi_progress.add(ProgressBar::new_spinner());
     pb.set_style(
         ProgressStyle::default_spinner()
@@ -380,19 +428,38 @@ fn create_partition_update(
             .unwrap(),
     );
     pb.enable_steady_tick(Duration::from_millis(100));
-    pb.set_message(format!("Processing {}", image_info.name));
+    pb.set_message(format!(
+        "Processing {} (~{} ops @ {})",
+        image_info.name,
+        expected_ops,
+        format_size(chunk_size)
+    ));
 
-    let (install_op, temp_file_path, compressed_size) = create_install_operation(
+    let operations_data = create_install_operations(
         &image_info.path,
         image_info.size,
         block_size,
         compression_method,
+        chunk_size,
     )?;
+
+    let mut install_ops = Vec::new();
+    let mut temp_paths = Vec::new();
+    let mut total_compressed = 0u64;
+
+    for (op, path, size) in operations_data {
+        install_ops.push(op);
+        temp_paths.push(path);
+        total_compressed += size;
+    }
 
     let partition_info = PartitionInfo {
         size: Some(image_info.size),
         hash: Some(image_info.hash.clone()),
     };
+
+    let ops_len = install_ops.len();
+
     let partition_update = PartitionUpdate {
         partition_name: image_info.name.clone(),
         run_postinstall: None,
@@ -401,7 +468,7 @@ fn create_partition_update(
         new_partition_signature: Vec::new(),
         old_partition_info: None,
         new_partition_info: Some(partition_info),
-        operations: vec![install_op],
+        operations: install_ops, // moved here
         postinstall_optional: None,
         hash_tree_data_extent: None,
         hash_tree_extent: None,
@@ -417,14 +484,15 @@ fn create_partition_update(
     };
 
     pb.finish_with_message(format!(
-        "✓ {} ({} -> {} - {:.1}%)",
+        "✓ {} ({} ops, {} -> {} - {:.1}%)",
         image_info.name,
+        ops_len,
         format_size(image_info.size),
-        format_size(compressed_size),
-        (compressed_size as f64 / image_info.size as f64) * 100.0
+        format_size(total_compressed),
+        (total_compressed as f64 / image_info.size as f64) * 100.0
     ));
 
-    Ok((partition_update, temp_file_path, compressed_size))
+    Ok((partition_update, temp_paths, total_compressed))
 }
 
 fn pack_payload(args: &Args, image_infos: &[ImageInfo]) -> Result<()> {
@@ -437,24 +505,34 @@ fn pack_payload(args: &Args, image_infos: &[ImageInfo]) -> Result<()> {
             .unwrap(),
     );
     main_pb.enable_steady_tick(Duration::from_millis(100));
-    main_pb.set_message("Creating manifest...");
+    main_pb.set_message(format!(
+        "Creating manifest (chunk size: {})...",
+        format_size(args.chunk_size)
+    ));
 
     let results: Vec<_> = image_infos
         .par_iter()
         .map(|image_info| {
-            create_partition_update(image_info, args.block_size, &args.method, &multi_progress)
+            create_partition_update(
+                image_info,
+                args.block_size,
+                &args.method,
+                args.chunk_size,
+                &multi_progress,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
 
     let mut partition_updates = Vec::new();
-    let mut temp_files = Vec::new();
+    let mut all_temp_files = Vec::new();
     let mut total_compressed_size = 0u64;
 
-    for (update, temp_path, size) in results {
+    for (update, temp_paths, size) in results {
         partition_updates.push(update);
-        temp_files.push(temp_path);
+        all_temp_files.extend(temp_paths);
         total_compressed_size += size;
     }
+
     let dynamic_partition_metadata = if !partition_updates.is_empty() {
         let partition_names = partition_updates
             .iter()
@@ -494,18 +572,18 @@ fn pack_payload(args: &Args, image_infos: &[ImageInfo]) -> Result<()> {
         security_patch_level: None,
     };
 
+    // Update data offsets for ALL operations
     let mut current_offset = 0u64;
+    let mut file_idx = 0;
     let mut manifest_with_offsets = manifest.clone();
 
-    for (i, partition) in manifest_with_offsets.partitions.iter_mut().enumerate() {
-        if partition.operations.is_empty() {
-            continue;
+    for partition in &mut manifest_with_offsets.partitions {
+        for op in &mut partition.operations {
+            op.data_offset = Some(current_offset);
+            let file_size = fs::metadata(&all_temp_files[file_idx])?.len();
+            current_offset += file_size;
+            file_idx += 1;
         }
-
-        let op = &mut partition.operations[0];
-        op.data_offset = Some(current_offset);
-        let file_size = fs::metadata(&temp_files[i])?.len();
-        current_offset += file_size;
     }
 
     let final_manifest = manifest_with_offsets.encode_to_vec();
@@ -513,14 +591,16 @@ fn pack_payload(args: &Args, image_infos: &[ImageInfo]) -> Result<()> {
     main_pb.set_message("Writing payload file...");
     let output_file = File::create(args.out.as_ref().unwrap())?;
     let mut writer = BufWriter::new(output_file);
+
+    // Write header
     writer.write_all(PAYLOAD_MAGIC)?;
     writer.write_u64::<BigEndian>(PAYLOAD_VERSION)?;
     writer.write_u64::<BigEndian>(final_manifest.len() as u64)?;
     writer.write_u32::<BigEndian>(0)?;
     writer.write_all(&final_manifest)?;
 
-    for (i, temp_path) in temp_files.iter().enumerate() {
-        let partition_name = &manifest.partitions[i].partition_name;
+    // Write all temp files sequentially
+    for (i, temp_path) in all_temp_files.iter().enumerate() {
         let file_size = fs::metadata(temp_path)?.len();
 
         let progress_bar = multi_progress.add(ProgressBar::new(file_size));
@@ -529,10 +609,10 @@ fn pack_payload(args: &Args, image_infos: &[ImageInfo]) -> Result<()> {
             .unwrap()
             .progress_chars("▰▱"));
         progress_bar.enable_steady_tick(Duration::from_millis(100));
-        progress_bar.set_message(format!("Writing {}", partition_name));
+        progress_bar.set_message(format!("Writing chunk {}/{}", i + 1, all_temp_files.len()));
 
         let mut reader = BufReader::new(File::open(temp_path)?);
-        const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
+        const CHUNK_SIZE: usize = 1024 * 1024;
         let mut buffer = vec![0; CHUNK_SIZE];
         let mut bytes_written = 0u64;
 
@@ -546,16 +626,18 @@ fn pack_payload(args: &Args, image_infos: &[ImageInfo]) -> Result<()> {
             progress_bar.set_position(bytes_written);
         }
 
-        progress_bar.finish_with_message(format!("✓ {} written", partition_name));
+        progress_bar.finish_with_message("✓");
         fs::remove_file(temp_path)?;
     }
 
     writer.flush()?;
+
     let elapsed_time = format_elapsed_time(start_time.elapsed());
     main_pb.finish_with_message(format!("Payload created successfully in {}", elapsed_time));
 
     let output_size = fs::metadata(args.out.as_ref().unwrap())?.len();
     let total_input_size: u64 = image_infos.iter().map(|info| info.size).sum();
+    let total_ops: usize = manifest.partitions.iter().map(|p| p.operations.len()).sum();
 
     println!("\nPayload creation completed in {}", elapsed_time);
     println!("Output file: {}", args.out.as_ref().unwrap().display());
@@ -564,7 +646,10 @@ fn pack_payload(args: &Args, image_infos: &[ImageInfo]) -> Result<()> {
         format_size(output_size),
         output_size
     );
-    println!("Total compressed size: {}", total_compressed_size);
+    println!(
+        "Total compressed size: {}",
+        format_size(total_compressed_size)
+    );
     println!(
         "Total input size: {} ({})",
         format_size(total_input_size),
@@ -575,6 +660,8 @@ fn pack_payload(args: &Args, image_infos: &[ImageInfo]) -> Result<()> {
         (output_size as f64 / total_input_size as f64) * 100.0
     );
     println!("Compression method: {}", args.method);
+    println!("Total operations: {}", total_ops);
+    println!("Average chunk size: {}", format_size(args.chunk_size));
 
     if !args.skip_prop {
         create_payload_properties(
@@ -608,8 +695,11 @@ fn get_output_path(args: &Args) -> PathBuf {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
     if args.images_dir.is_none() && args.images_path.is_empty() {
-        return Err(anyhow!("Invalid arguments : See --help for usage"));
+        return Err(anyhow!(
+            "Invalid arguments: Must provide either --images-dir or --images-path. See --help for usage"
+        ));
     }
 
     let output_path = get_output_path(&args);
