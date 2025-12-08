@@ -344,7 +344,7 @@ jobs:
           tag_name: payload-packer-v${{ steps.version.outputs.version }}
           name: "payload-packer-rust v${{ steps.version.outputs.version }}"
           body: |
-          .
+                 .
           files: |
             artifacts/**/*.zip
         env:
