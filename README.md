@@ -20,15 +20,17 @@ Options:
       --images-path <IMAGES_PATH>
           Specific image paths (can be used instead of or together with images_dir)
       --images <IMAGES>
-          Comma-separated list of partition names to include (default: all)
+          Comma-separated list of partition names to include (default: all) [default: ]
       --method <METHOD>
-          Compression method to use (xz or zstd) [default: xz] [possible values: xz, zstd]
+          Compression method to use (xz, zstd, or bz2) [default: xz] [possible values: xz, zstd, bz2]
       --threads <THREADS>
           Number of threads to use for parallel processing
       --block-size <BLOCK_SIZE>
           Block size in bytes [default: 4096]
       --skip-prop
           Skip creation of payload_properties.txt file
+      --chunk-size <CHUNK_SIZE>
+          Target chunk size per operation in bytes (default: 2MB = 2097152) [default: 2097152]
   -h, --help
           Print help
   -V, --version
