@@ -2,7 +2,7 @@
 
 - CLI utility to pack Android device partitions as payload.bin.
 ---
-⚠️ This tool is experimental.
+- This tool is experimental.
 
 
 
@@ -37,11 +37,11 @@ Options:
           Print version
 ```
 
-- ✅ Pack multiple partitions into a payload.bin
+-  Pack multiple partitions into a payload.bin
 
-- ✅ Supports XZ and Zstd
+-  Supports XZ, Zstd and bz2
 
-- ✅ Multi-threaded compression
+-  Multi-threaded compression
 
 
 | Feature           | **XZ**                            | **Zstandard (zstd)**                |
@@ -61,7 +61,7 @@ It will pack any files with a `.img` extension.
 ```
 cargo install payload_packer
 ```
-- [Download prebuilt Binaries](https://github.com/rhythmcache/payload_packer/releases/tag/v0.1.0)
+- [Download prebuilt Binaries](https://github.com/rhythmcache/payload_packer/releases)
 
 
 #### Dependencies :
