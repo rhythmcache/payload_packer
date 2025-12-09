@@ -18,18 +18,23 @@ clap = { version = "4.5", features = ["derive"] }
 digest = "0.10"
 hex = "0.4"
 indicatif = "0.17"
-lazy_static = "1.4"
+lazy_static = "1.5"
 liblzma = { version = "*", features = ["static"] }
-num_cpus = "1.16"
-prost = "0.13.5"
-rayon = "1.8"
+num_cpus = "1.17"
+prost = "0.14.1"
+rayon = "1.11"
 sha2 = "0.10"
 zstd = "0.13.3"
 base64 = "0.22.1"
-tempfile = "3.10"
+tempfile = "3.23"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 bzip2 = { version = "0.6.1", features = ["static"] }
+
+[dependencies.payload_dumper]
+git = "https://github.com/rhythmcache/payload-dumper-rust.git"
+package = "payload_dumper"
+default-features = false
 
 [profile.release]
 opt-level = 3

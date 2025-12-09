@@ -12,11 +12,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-
-mod structs;
-use structs::*;
-
-include!("proto/update_metadata.rs");
+use payload_dumper::structs::*;
 
 const PAYLOAD_MAGIC: &[u8] = b"CrAU";
 const PAYLOAD_VERSION: u64 = 2;
