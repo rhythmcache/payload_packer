@@ -4,6 +4,8 @@ use byteorder::{BigEndian, WriteBytesExt};
 use clap::Parser;
 use digest::Digest;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use payload_dumper::structs::*;
+use payload_dumper::utils::{format_elapsed_time, format_size};
 use prost::Message;
 use rayon::prelude::*;
 use sha2::Sha256;
@@ -12,7 +14,6 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use payload_dumper::structs::*;
 
 const PAYLOAD_MAGIC: &[u8] = b"CrAU";
 const PAYLOAD_VERSION: u64 = 2;
@@ -73,38 +74,6 @@ struct ImageInfo {
     name: String,
     size: u64,
     hash: Vec<u8>,
-}
-
-fn format_size(size: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if size >= GB {
-        format!("{:.2} GB", size as f64 / GB as f64)
-    } else if size >= MB {
-        format!("{:.2} MB", size as f64 / MB as f64)
-    } else if size >= KB {
-        format!("{:.2} KB", size as f64 / KB as f64)
-    } else {
-        format!("{} bytes", size)
-    }
-}
-
-fn format_elapsed_time(duration: Duration) -> String {
-    let total_secs = duration.as_secs();
-    let hours = total_secs / 3600;
-    let mins = (total_secs % 3600) / 60;
-    let secs = total_secs % 60;
-    let millis = duration.subsec_millis();
-
-    if hours > 0 {
-        format!("{}h {}m {}.{:03}s", hours, mins, secs, millis)
-    } else if mins > 0 {
-        format!("{}m {}.{:03}s", mins, secs, millis)
-    } else {
-        format!("{}.{:03}s", secs, millis)
-    }
 }
 
 fn calculate_hash(file_path: &Path) -> Result<Vec<u8>> {
