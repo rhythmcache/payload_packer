@@ -15,6 +15,26 @@ For an end-to-end proof of concept and validation tests for both full and increm
 - Generate incremental (delta) OTA payloads between two versions
 
 
+## Installation
+
+You can install it using one of the following methods:
+
+- Via Cargo:
+
+```
+cargo install payload_packer
+```
+- From prebuilt binaries:
+  Download the appropriate binary for your platform from the [Releases page](https://github.com/rhythmcache/payload_packer/releases)
+
+- Build from source:
+```
+  git clone https://github.com/rhythmcache/payload_packer.git
+  cd payload_packer
+  cargo build --release
+  ```
+
+
 
 ## Usage
 
