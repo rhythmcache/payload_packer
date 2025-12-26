@@ -20,7 +20,7 @@ use tempfile::TempDir;
 
 const PAYLOAD_MAGIC: &[u8] = b"CrAU";
 const PAYLOAD_VERSION: u64 = 2;
-const MMAP_THRESHOLD: u64 = 400 * 1024 * 1024;
+// const MMAP_THRESHOLD: u64 = 400 * 1024 * 1024;
 
 #[derive(Parser, Clone)]
 #[command(version, about = "Android payload generator (full and delta)")]
