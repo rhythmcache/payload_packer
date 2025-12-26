@@ -1,0 +1,2 @@
+- Added bzip2 compression
+- Breaks partitions into 2 mb chunks during packing 

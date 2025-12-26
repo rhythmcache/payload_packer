@@ -1,0 +1,131 @@
+name: Windows Builds
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        architecture: [x86_64, i686]
+      fail-fast: false
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install protoc and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake mingw-w64
+          protoc --version
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Set target
+        id: set-target
+        run: |
+          case "${{ matrix.architecture }}" in
+            x86_64)
+              echo "TARGET=x86_64-pc-windows-gnu" >> $GITHUB_ENV
+              echo "ARCH_DIR=x86_64" >> $GITHUB_ENV
+              echo "CC=x86_64-w64-mingw32-gcc" >> $GITHUB_ENV
+              echo "CXX=x86_64-w64-mingw32-g++" >> $GITHUB_ENV
+              echo "HOST_TRIPLE=x86_64-w64-mingw32" >> $GITHUB_ENV
+              ;;
+            i686)
+              echo "TARGET=i686-pc-windows-gnu" >> $GITHUB_ENV
+              echo "ARCH_DIR=x86" >> $GITHUB_ENV
+              echo "CC=i686-w64-mingw32-gcc" >> $GITHUB_ENV
+              echo "CXX=i686-w64-mingw32-g++" >> $GITHUB_ENV
+              echo "HOST_TRIPLE=i686-w64-mingw32" >> $GITHUB_ENV
+              ;;
+          esac
+
+      - name: Add Rust target
+        run: rustup target add ${{ env.TARGET }}
+
+      - name: Setup Cargo config
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << EOF
+          [target.${{ env.TARGET }}]
+          linker = "${{ env.CC }}"
+          rustflags = ["-L", "lib/win/${{ env.ARCH_DIR }}", "-l", "lzma"]
+          EOF
+          cat .cargo/config.toml
+
+      - name: Prepare library directories
+        run: |
+          mkdir -p $PWD/lib/win/${{ env.ARCH_DIR }}
+          mkdir -p $PWD/lib/win/${{ env.ARCH_DIR }}/include
+          mkdir -p $PWD/lib/win/${{ env.ARCH_DIR }}/lib
+          mkdir -p $PWD/lib/win/${{ env.ARCH_DIR }}/pkgconfig
+          echo "INSTALL_PREFIX=$PWD/lib/win/${{ env.ARCH_DIR }}" >> $GITHUB_ENV
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$PWD/lib/win/${{ env.ARCH_DIR }}/lib/pkgconfig" >> $GITHUB_ENV
+          echo "CFLAGS=-I$PWD/lib/win/${{ env.ARCH_DIR }}/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$PWD/lib/win/${{ env.ARCH_DIR }}/lib" >> $GITHUB_ENV
+
+      - name: Build liblzma
+        run: |
+          cd /tmp
+          wget https://github.com/tukaani-project/xz/releases/download/v5.8.1/xz-5.8.1.tar.gz
+          tar -xzf xz-5.8.1.tar.gz
+          cd xz-5.8.1
+          
+          # Configure and build
+          ./configure --prefix=${{ env.INSTALL_PREFIX }} \
+            --disable-shared --enable-static \
+            --disable-nls --disable-xz --disable-xzdec \
+            --disable-lzmadec --disable-lzmainfo \
+            --host=${{ env.HOST_TRIPLE }}
+          
+          make -j$(nproc)
+          make install
+          
+          # Verify installation
+          ls -la ${{ env.INSTALL_PREFIX }}/lib/liblzma.a || echo "Failed to build liblzma.a"
+        env:
+          CC: ${{ env.CC }}
+          CFLAGS: -fPIC ${{ env.CFLAGS }}
+          LDFLAGS: ${{ env.LDFLAGS }}
+
+      - name: Verify libraries
+        run: |
+          echo "Checking library directories:"
+          ls -la ${{ env.INSTALL_PREFIX }}/lib/ || echo "No lib directory found"
+          echo "Static libraries:"
+          find ${{ env.INSTALL_PREFIX }}/lib -name "*.a" || echo "No static libraries found"
+
+      - name: Build for ${{ matrix.architecture }}
+        run: |
+          echo "Building for ${{ env.TARGET }}"
+          RUSTFLAGS="-C link-args=-llzma" \
+          cargo build --release --target ${{ env.TARGET }}
+        env:
+          PKG_CONFIG_ALLOW_CROSS: 1
+          PKG_CONFIG_PATH: ${{ env.PKG_CONFIG_PATH }}
+
+      - name: Create Dir
+        run: mkdir -p artifacts
+
+      - name: Copy binaries
+        run: |
+          cp target/${{ env.TARGET }}/release/payload_packer.exe ./artifacts/payload_packer-${{ matrix.architecture }}.exe || echo "Binary not found"
+          if [ ! -f ./artifacts/payload_packer-${{ matrix.architecture }}.exe ]; then
+            echo "Failed to find binary"
+            find target -type f -name "*.exe" | sort
+          fi
+
+      - name: Upload Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload_packer-${{ matrix.architecture }}-windows
+          path: artifacts/payload_packer-${{ matrix.architecture }}.exe
+          if-no-files-found: warn
