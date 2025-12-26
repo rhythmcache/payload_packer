@@ -23,7 +23,10 @@ const PAYLOAD_VERSION: u64 = 2;
 // const MMAP_THRESHOLD: u64 = 400 * 1024 * 1024;
 
 #[derive(Parser, Clone)]
-#[command(version, about = "Android payload generator (full and delta)")]
+#[command(
+    version,
+    about = "A standalone tool for generating full and incremental Android OTA payloads for A/B devices."
+)]
 #[command(next_line_help = true)]
 struct Args {
     #[arg(
