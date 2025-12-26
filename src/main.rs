@@ -211,28 +211,24 @@ thread_local! {
     static ZSTD_ENCODER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4 * 1024 * 1024));
 }
 
-fn calculate_hash(file_path: &Path) -> Result<Vec<u8>> {
-    let file = File::open(file_path)
-        .with_context(|| format!("Failed to open file for hashing: {}", file_path.display()))?;
-    let file_size = file.metadata()?.len();
-
+fn calculate_hash(reader: &mut FileReader) -> Result<Vec<u8>> {
     let mut hasher = Sha256::new();
-
-    if file_size > MMAP_THRESHOLD {
-        let mmap = unsafe { Mmap::map(&file)? };
-        hasher.update(&mmap);
-    } else {
-        let mut reader = BufReader::new(file);
-        let mut buffer = vec![0u8; 1024 * 1024];
-        loop {
-            let bytes_read = reader.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
+    match reader {
+        FileReader::Mmap(mmap) => {
+            hasher.update(&mmap);
+        }
+        FileReader::Buffered(buf_reader) => {
+            buf_reader.seek(SeekFrom::Start(0))?;
+            let mut buffer = vec![0u8; 1024 * 1024];
+            loop {
+                let bytes_read = buf_reader.read(&mut buffer)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..bytes_read]);
             }
-            hasher.update(&buffer[..bytes_read]);
         }
     }
-
     Ok(hasher.finalize().to_vec())
 }
 
@@ -577,6 +573,7 @@ fn find_image_files(
     individual_images: &[PathBuf],
     partition_filter: &[String],
     label: &str,
+    mmap_threshold: u64,
 ) -> Result<Vec<ImageInfo>> {
     let mut image_paths = Vec::new();
     let mut seen_names = AHashSet::new();
@@ -676,7 +673,8 @@ fn find_image_files(
             }
 
             let size = fs::metadata(path)?.len();
-            let hash = calculate_hash(path)?;
+            let mut reader = FileReader::new(path, mmap_threshold)?;
+            let hash = calculate_hash(&mut reader)?;
 
             if let Some(pb) = pb {
                 pb.finish_with_message(format!(
@@ -736,12 +734,14 @@ fn create_payload_properties(
     payload_path: &Path,
     manifest_data: &[u8],
     manifest_size: u64,
+    mmap_threshold: u64,
 ) -> Result<()> {
     let properties_path = payload_path.with_file_name("payload_properties.txt");
     let mut file = File::create(&properties_path)?;
 
-    let file_hash = calculate_hash(payload_path)?;
     let file_size = fs::metadata(payload_path)?.len();
+    let mut reader = FileReader::new(payload_path, mmap_threshold)?;
+    let file_hash = calculate_hash(&mut reader)?;
 
     let metadata_hash = calculate_hash_from_data(manifest_data);
 
@@ -978,6 +978,7 @@ fn pack_payload(args: &Args) -> Result<()> {
         &args.target_images,
         &args.partition_filter,
         "target",
+        args.mmap_threshold,
     )?;
 
     if target_images.is_empty() {
@@ -996,6 +997,7 @@ fn pack_payload(args: &Args) -> Result<()> {
             &args.source_images,
             &args.partition_filter,
             "source",
+            args.mmap_threshold,
         )?;
 
         if source_images.is_empty() {
@@ -1245,7 +1247,12 @@ fn pack_payload(args: &Args) -> Result<()> {
     println!("========================================");
 
     if !args.skip_properties {
-        create_payload_properties(output_path, &final_manifest, final_manifest.len() as u64)?;
+        create_payload_properties(
+            output_path,
+            &final_manifest,
+            final_manifest.len() as u64,
+            args.mmap_threshold,
+        )?;
     }
 
     Ok(())
