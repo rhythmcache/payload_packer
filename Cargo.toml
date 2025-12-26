@@ -33,6 +33,7 @@ bzip2 = { version = "0.6.1", features = ["static"] }
 payload_dumper = { version = "0.8.1", default-features = false }
 bsdiff-android = { git = "https://github.com/rhythmcache/bsdiff-android", version = "0.0.1" }
 ahash = "0.8.12"
+memmap2 = "0.9.9"
 
 [profile.release]
 opt-level = 3

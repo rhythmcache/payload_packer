@@ -5,11 +5,13 @@ use byteorder::{BigEndian, WriteBytesExt};
 use clap::Parser;
 use digest::Digest;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use memmap2::Mmap;
 use payload_dumper::structs::*;
 use payload_dumper::utils::{format_elapsed_time, format_size};
 use prost::Message;
 use rayon::prelude::*;
 use sha2::Sha256;
+use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -18,6 +20,7 @@ use tempfile::TempDir;
 
 const PAYLOAD_MAGIC: &[u8] = b"CrAU";
 const PAYLOAD_VERSION: u64 = 2;
+const MMAP_THRESHOLD: u64 = 400 * 1024 * 1024;
 
 #[derive(Parser, Clone)]
 #[command(version, about = "Android OTA payload.bin generator (full and delta)")]
@@ -116,6 +119,13 @@ struct Args {
         help = "Target chunk size per operation in bytes (default: 2MB)"
     )]
     chunk_size: u64,
+
+    #[arg(
+        long = "mmap-threshold",
+        default_value = "419430400",
+        help = "File size threshold for using memory mapping (default: 400MB)"
+    )]
+    mmap_threshold: u64,
 }
 
 #[derive(Clone)]
@@ -160,21 +170,67 @@ impl TempFileManager {
     }
 }
 
+enum FileReader {
+    Mmap(Mmap),
+    Buffered(BufReader<File>),
+}
+
+impl FileReader {
+    fn new(path: &Path, mmap_threshold: u64) -> Result<Self> {
+        let file = File::open(path)?;
+        let size = file.metadata()?.len();
+
+        if size > mmap_threshold {
+            let mmap = unsafe { Mmap::map(&file)? };
+            Ok(FileReader::Mmap(mmap))
+        } else {
+            Ok(FileReader::Buffered(BufReader::new(file)))
+        }
+    }
+
+    fn read_chunk(&mut self, offset: u64, size: usize) -> Result<Vec<u8>> {
+        match self {
+            FileReader::Mmap(mmap) => {
+                let end = (offset as usize + size).min(mmap.len());
+                Ok(mmap[offset as usize..end].to_vec())
+            }
+            FileReader::Buffered(reader) => {
+                reader.seek(SeekFrom::Start(offset))?;
+                let mut buffer = vec![0u8; size];
+                let bytes_read = reader.read(&mut buffer)?;
+                buffer.truncate(bytes_read);
+                Ok(buffer)
+            }
+        }
+    }
+}
+
+thread_local! {
+    static XZ_ENCODER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4 * 1024 * 1024));
+    static BZ2_ENCODER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4 * 1024 * 1024));
+    static ZSTD_ENCODER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4 * 1024 * 1024));
+}
+
 fn calculate_hash(file_path: &Path) -> Result<Vec<u8>> {
     let file = File::open(file_path)
         .with_context(|| format!("Failed to open file for hashing: {}", file_path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 8192];
+    let file_size = file.metadata()?.len();
 
-    loop {
-        let bytes_read = reader
-            .read(&mut buffer)
-            .context("Failed to read file during hashing")?;
-        if bytes_read == 0 {
-            break;
+    let mut hasher = Sha256::new();
+
+    if file_size > MMAP_THRESHOLD {
+        let mmap = unsafe { Mmap::map(&file)? };
+        hasher.update(&mmap);
+    } else {
+        let mut reader = BufReader::new(file);
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let bytes_read = reader.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
         }
-        hasher.update(&buffer[..bytes_read]);
     }
 
     Ok(hasher.finalize().to_vec())
@@ -204,33 +260,61 @@ fn compress_data(data: &[u8], compression_method: &str, level: i32) -> Result<Ve
         "xz" => {
             use liblzma::write::XzEncoder;
             let level = level.clamp(0, 9) as u32;
-            let mut encoder = XzEncoder::new(Vec::new(), level);
-            encoder
-                .write_all(data)
-                .context("Failed to write to XZ encoder")?;
-            encoder.finish().context("Failed to finish XZ compression")
+
+            XZ_ENCODER_BUFFER.with(|buffer| {
+                let mut buf = buffer.borrow_mut();
+                buf.clear();
+
+                let mut encoder = XzEncoder::new(&mut *buf, level);
+                encoder
+                    .write_all(data)
+                    .context("Failed to write to XZ encoder")?;
+                encoder
+                    .finish()
+                    .context("Failed to finish XZ compression")?;
+
+                Ok(std::mem::take(&mut *buf))
+            })
         }
         "bz2" | "bzip2" => {
             use bzip2::Compression;
             use bzip2::write::BzEncoder;
             let level = level.clamp(1, 9) as u32;
             let compression = Compression::new(level);
-            let mut encoder = BzEncoder::new(Vec::new(), compression);
-            encoder
-                .write_all(data)
-                .context("Failed to write to BZ2 encoder")?;
-            encoder.finish().context("Failed to finish BZ2 compression")
+
+            BZ2_ENCODER_BUFFER.with(|buffer| {
+                let mut buf = buffer.borrow_mut();
+                buf.clear();
+
+                let mut encoder = BzEncoder::new(&mut *buf, compression);
+                encoder
+                    .write_all(data)
+                    .context("Failed to write to BZ2 encoder")?;
+                encoder
+                    .finish()
+                    .context("Failed to finish BZ2 compression")?;
+
+                Ok(std::mem::take(&mut *buf))
+            })
         }
         "zstd" => {
             let level = level.clamp(1, 22);
-            let mut encoder =
-                zstd::Encoder::new(Vec::new(), level).context("Failed to create Zstd encoder")?;
-            encoder
-                .write_all(data)
-                .context("Failed to write to Zstd encoder")?;
-            encoder
-                .finish()
-                .context("Failed to finish Zstd compression")
+
+            ZSTD_ENCODER_BUFFER.with(|buffer| {
+                let mut buf = buffer.borrow_mut();
+                buf.clear();
+
+                let mut encoder = zstd::Encoder::new(&mut *buf, level)
+                    .context("Failed to create Zstd encoder")?;
+                encoder
+                    .write_all(data)
+                    .context("Failed to write to Zstd encoder")?;
+                encoder
+                    .finish()
+                    .context("Failed to finish Zstd compression")?;
+
+                Ok(std::mem::take(&mut *buf))
+            })
         }
         _ => Err(anyhow!(
             "Unsupported compression method: {}",
@@ -267,16 +351,15 @@ fn create_delta_operations(
     compression_level: i32,
     target_chunk_size: u64,
     temp_manager: &TempFileManager,
+    mmap_threshold: u64,
 ) -> Result<Vec<(InstallOperation, PathBuf, u64)>> {
     let mut operations = Vec::new();
 
     let chunk_size =
         ((target_chunk_size + block_size as u64 - 1) / block_size as u64) * block_size as u64;
 
-    let mut source_file = File::open(source_path)
-        .with_context(|| format!("Failed to open source file: {}", source_path.display()))?;
-    let mut target_file = File::open(target_path)
-        .with_context(|| format!("Failed to open target file: {}", target_path.display()))?;
+    let mut source_reader = FileReader::new(source_path, mmap_threshold)?;
+    let mut target_reader = FileReader::new(target_path, mmap_threshold)?;
 
     let mut target_offset = 0u64;
     let mut current_block = 0u64;
@@ -285,13 +368,11 @@ fn create_delta_operations(
         let remaining = target_size - target_offset;
         let this_chunk_size = remaining.min(chunk_size);
 
-        target_file.seek(SeekFrom::Start(target_offset))?;
-        let mut target_chunk = vec![0u8; this_chunk_size as usize];
-        target_file.read_exact(&mut target_chunk)?;
+        let mut target_chunk = target_reader.read_chunk(target_offset, this_chunk_size as usize)?;
 
         let aligned_size =
             ((this_chunk_size + block_size as u64 - 1) / block_size as u64) * block_size as u64;
-        if aligned_size > this_chunk_size {
+        if aligned_size as usize > target_chunk.len() {
             target_chunk.resize(aligned_size as usize, 0);
         }
 
@@ -315,10 +396,9 @@ fn create_delta_operations(
 
             operations.push((operation, PathBuf::new(), 0));
         } else if target_offset < source_size {
-            source_file.seek(SeekFrom::Start(target_offset))?;
             let source_chunk_size = (source_size - target_offset).min(this_chunk_size);
-            let mut source_chunk = vec![0u8; source_chunk_size as usize];
-            source_file.read_exact(&mut source_chunk)?;
+            let mut source_chunk =
+                source_reader.read_chunk(target_offset, source_chunk_size as usize)?;
 
             source_chunk.resize(aligned_size as usize, 0);
 
@@ -438,14 +518,14 @@ fn create_full_operations(
     compression_level: i32,
     target_chunk_size: u64,
     temp_manager: &TempFileManager,
+    mmap_threshold: u64,
 ) -> Result<Vec<(InstallOperation, PathBuf, u64)>> {
     let mut operations = Vec::new();
 
     let chunk_size =
         ((target_chunk_size + block_size as u64 - 1) / block_size as u64) * block_size as u64;
 
-    let mut file = File::open(image_path)
-        .with_context(|| format!("Failed to open image file: {}", image_path.display()))?;
+    let mut reader = FileReader::new(image_path, mmap_threshold)?;
     let mut offset = 0u64;
     let mut current_block = 0u64;
 
@@ -453,13 +533,11 @@ fn create_full_operations(
         let remaining = image_size - offset;
         let this_chunk_size = remaining.min(chunk_size);
 
-        file.seek(SeekFrom::Start(offset))?;
-        let mut chunk_data = vec![0u8; this_chunk_size as usize];
-        file.read_exact(&mut chunk_data)?;
+        let mut chunk_data = reader.read_chunk(offset, this_chunk_size as usize)?;
 
         let aligned_size =
             ((this_chunk_size + block_size as u64 - 1) / block_size as u64) * block_size as u64;
-        if aligned_size > this_chunk_size {
+        if aligned_size as usize > chunk_data.len() {
             chunk_data.resize(aligned_size as usize, 0);
         }
 
@@ -707,6 +785,7 @@ fn create_full_partition_update(
         compression_level,
         args.chunk_size,
         temp_manager,
+        args.mmap_threshold,
     )?;
 
     let mut install_ops = Vec::new();
@@ -795,6 +874,7 @@ fn create_delta_partition_update(
         compression_level,
         args.chunk_size,
         temp_manager,
+        args.mmap_threshold,
     )?;
 
     let mut install_ops = Vec::new();
@@ -870,9 +950,10 @@ fn pack_payload(args: &Args) -> Result<()> {
     main_pb.enable_steady_tick(Duration::from_millis(100));
 
     println!("\n========================================");
-    println!("Android OTA Payload Builder");
+    println!("Android OTA Payload Builder (Optimized)");
     println!("========================================");
     println!("Mode: {}", if args.delta { "DELTA" } else { "FULL" });
+    println!("Memory-map threshold: {}", format_size(args.mmap_threshold));
     if args.delta {
         println!(
             "Compression: {} (level {}) for REPLACE ops",
