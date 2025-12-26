@@ -23,7 +23,7 @@ const PAYLOAD_VERSION: u64 = 2;
 const MMAP_THRESHOLD: u64 = 400 * 1024 * 1024;
 
 #[derive(Parser, Clone)]
-#[command(version, about = "Android OTA payload.bin generator (full and delta)")]
+#[command(version, about = "Android payload generator (full and delta)")]
 #[command(next_line_help = true)]
 struct Args {
     #[arg(
@@ -950,7 +950,7 @@ fn pack_payload(args: &Args) -> Result<()> {
     main_pb.enable_steady_tick(Duration::from_millis(100));
 
     println!("\n========================================");
-    println!("Android OTA Payload Builder (Optimized)");
+    println!("Android Payload Generator");
     println!("========================================");
     println!("Mode: {}", if args.delta { "DELTA" } else { "FULL" });
     println!("Memory-map threshold: {}", format_size(args.mmap_threshold));
@@ -959,7 +959,7 @@ fn pack_payload(args: &Args) -> Result<()> {
             "Compression: {} (level {}) for REPLACE ops",
             args.compression_method, compression_level
         );
-        println!("             BZ2 (built-in) for BSDIFF ops");
+        println!("             BZ2 for BSDIFF ops");
     } else {
         println!(
             "Compression: {} (level {})",
@@ -1158,7 +1158,7 @@ fn pack_payload(args: &Args) -> Result<()> {
     main_pb.finish_with_message("Payload creation complete!");
 
     println!("\n========================================");
-    println!("Payload Creation Summary");
+    println!("Payload Generation Summary");
     println!("========================================");
     println!(
         "Mode: {}",
