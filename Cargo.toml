@@ -1,9 +1,9 @@
 [package]
 name = "payload_packer"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["rhythmcache"]
-description = "CLI Utility to pack android device partitions as payload.bin"
+description = "A standalone tool for generating full and incremental Android OTA payloads for A/B devices."
 repository = "https://github.com/rhythmcache/payload_packer"
 homepage = "https://github.com/rhythmcache/payload_packer"
 readme = "README.md"
@@ -27,11 +27,9 @@ sha2 = "0.10"
 zstd = "0.13.3"
 base64 = "0.22.1"
 tempfile = "3.23"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
 bzip2 = { version = "0.6.1", features = ["static"] }
 payload_dumper = { version = "0.8.1", default-features = false }
-bsdiff-android = { git = "https://github.com/rhythmcache/bsdiff-android", version = "0.0.1" }
+bsdiff-android = "0.0.2"
 ahash = "0.8.12"
 memmap2 = "0.9.9"
 
